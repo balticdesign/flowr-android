@@ -5,8 +5,13 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:async';
+import 'dart:math' as math;
 import 'petal_wheel.dart';
 import 'midi_service.dart';
+
+// v2.0 imports
+import 'models/models.dart';
+import 'services/services.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -45,13 +50,21 @@ class PetalsHome extends StatefulWidget {
 }
 
 class _PetalsHomeState extends State<PetalsHome> {
+  // === V1.0 STATE (Explorer/Parallel modes) ===
   String _selectedKey = 'C';
   bool _isMinor = false;
+  
+  // === V2.0 STATE (Songwriter mode) ===
+  late final FlowrState _flowrState;
+  
+  // === SHARED STATE ===
   bool _showSettings = false;
   bool _showMidiDebug = false;
   bool _showMidiTooltip = false;
-  bool _useParallelLayout = false;
   bool _hapticsEnabled = true;
+  
+  // Play mode: 'songwriter' (v2.0), 'explorer' (v1.0 circle of 5ths), 'parallel' (v1.0 parallel)
+  String _playMode = 'explorer';  // Default to v1.0 for backwards compatibility
   
   // XY Pad CC assignments
   int _xAxisCC = 1;
@@ -67,9 +80,13 @@ class _PetalsHomeState extends State<PetalsHome> {
   
   final MidiService _midiService = MidiService();
   
+  // MIDI output mode
+  MidiOutputMode _midiOutputMode = MidiOutputMode.apps;
+  
   final List<String> _midiLog = [];
   static const int _maxLogEntries = 5;
 
+  // v1.0 button colors and chord types
   final List<Color> _buttonColors = [
     const Color(0xFF8B0A50),
     const Color(0xFFDC143C),
@@ -116,7 +133,34 @@ class _PetalsHomeState extends State<PetalsHome> {
   @override
   void initState() {
     super.initState();
+    _initFlowrState();
     _initMidi();
+  }
+  
+  void _initFlowrState() {
+    _flowrState = FlowrState();
+    
+    // Wire up MIDI output
+    _flowrState.onMidiNote = (note, velocity, noteOn) {
+      if (noteOn) {
+        _midiService.sendNoteOn(note, velocity);
+      } else {
+        _midiService.sendNoteOff(note);
+      }
+    };
+    
+    _flowrState.onMidiCC = (cc, value) {
+      _midiService.sendCC(cc, value);
+    };
+    
+    // Listen for state changes
+    _flowrState.addListener(_onFlowrStateChanged);
+  }
+  
+  void _onFlowrStateChanged() {
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _initMidi() async {
@@ -126,6 +170,7 @@ class _PetalsHomeState extends State<PetalsHome> {
 
   @override
   void dispose() {
+    _flowrState.removeListener(_onFlowrStateChanged);
     _gyroSubscription?.cancel();
     _midiService.dispose();
     super.dispose();
@@ -190,7 +235,14 @@ class _PetalsHomeState extends State<PetalsHome> {
   }
 
   String _getMidiStatusText() {
-    return _midiService.isConnected ? 'USB MIDI Connected' : 'MIDI Not Connected';
+    return _midiService.connectionStatusText;
+  }
+  
+  void _setMidiOutputMode(MidiOutputMode mode) {
+    setState(() {
+      _midiOutputMode = mode;
+      _midiService.setOutputMode(mode);
+    });
   }
 
   void _logMidi(String message) {
@@ -202,6 +254,7 @@ class _PetalsHomeState extends State<PetalsHome> {
     });
   }
 
+  // v1.0 chord note calculation
   int _noteToMidi(String note) {
     const noteMap = {
       'C': 60, 'D': 62, 'E': 64, 'F': 65, 'G': 67, 'A': 69, 'B': 71,
@@ -237,57 +290,25 @@ class _PetalsHomeState extends State<PetalsHome> {
       _showSettings = false;
     });
   }
+  
+  void _setPlayMode(String mode) {
+    setState(() {
+      _playMode = mode;
+    });
+    
+    // Panic to release any held notes when switching modes
+    _flowrState.panic();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Stack(
         children: [
-          Row(
-            children: [
-              Expanded(
-                flex: 5,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 4, top: 4, bottom: 4),
-                    child: PetalWheel(
-                      selectedKey: _selectedKey,
-                      isMinor: _isMinor,
-                      useParallelLayout: _useParallelLayout,
-                      hapticsEnabled: _hapticsEnabled,
-                      onKeySelected: (key, minor) {
-                        setState(() {
-                          _selectedKey = key;
-                          _isMinor = minor;
-                        });
-                        _logMidi('KEY: $key${minor ? 'm' : ''}');
-                      },
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 20),
-              Expanded(
-                flex: 4,
-                child: Padding(
-                  padding: const EdgeInsets.all(12.0),
-                  child: ChordButtonGrid(
-                    buttonColors: _buttonColors,
-                    chordTypes: _chordTypes,
-                    selectedKey: _selectedKey,
-                    isMinor: _isMinor,
-                    getChordNotes: _getChordNotes,
-                    getChordName: _getChordName,
-                    midiService: _midiService,
-                    logMidi: _logMidi,
-                    xAxisCC: _xAxisCC,
-                    yAxisCC: _yAxisCC,
-                  ),
-                ),
-              ),
-            ],
-          ),
+          // Main content - switch based on play mode
+          _playMode == 'songwriter' 
+              ? _buildSongwriterMode()
+              : _buildExplorerMode(),
           
           // Settings icon
           Positioned(
@@ -330,9 +351,34 @@ class _PetalsHomeState extends State<PetalsHome> {
             ),
           ),
           
+          // Mode indicator (bottom-left, above GYRO if present)
+          Positioned(
+            bottom: _gyroEnabled ? 38 : 12,
+            left: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: _playMode == 'songwriter' 
+                    ? Colors.purple.withOpacity(0.8)
+                    : Colors.blue.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                _playMode == 'songwriter' 
+                    ? 'SONGWRITER' 
+                    : _playMode == 'parallel' ? 'PARALLEL' : 'EXPLORER',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 7,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+          
           // MIDI indicator
           Positioned(
-            bottom: 16,
+            bottom: 12,
             left: 0,
             right: 0,
             child: Center(
@@ -343,19 +389,19 @@ class _PetalsHomeState extends State<PetalsHome> {
                     opacity: _showMidiTooltip ? 1.0 : 0.0,
                     duration: const Duration(milliseconds: 200),
                     child: Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
                         color: _midiService.isConnected 
                             ? Colors.green.withOpacity(0.9)
                             : Colors.red.withOpacity(0.9),
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(
                         _getMidiStatusText(),
                         style: const TextStyle(
                           color: Colors.white,
-                          fontSize: 12,
+                          fontSize: 10,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
@@ -365,8 +411,8 @@ class _PetalsHomeState extends State<PetalsHome> {
                     onTap: _onMidiTap,
                     child: SvgPicture.asset(
                       'assets/midi_connected.svg',
-                      width: 32,
-                      height: 32,
+                      width: 20,
+                      height: 20,
                       colorFilter: ColorFilter.mode(
                         _midiService.isConnected ? Colors.green : Colors.grey,
                         BlendMode.srcIn,
@@ -381,24 +427,24 @@ class _PetalsHomeState extends State<PetalsHome> {
           // Gyro indicator (bottom-left)
           if (_gyroEnabled)
             Positioned(
-              bottom: 16,
-              left: 16,
+              bottom: 12,
+              left: 12,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                 decoration: BoxDecoration(
                   color: Colors.purple.withOpacity(0.8),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(8),
                 ),
                 child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.screen_rotation, color: Colors.white, size: 16),
-                    SizedBox(width: 4),
+                    Icon(Icons.screen_rotation, color: Colors.white, size: 11),
+                    SizedBox(width: 3),
                     Text(
                       'GYRO',
                       style: TextStyle(
                         color: Colors.white,
-                        fontSize: 10,
+                        fontSize: 7,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
@@ -452,7 +498,8 @@ class _PetalsHomeState extends State<PetalsHome> {
           if (_showSettings)
             SettingsOverlay(
               showMidiDebug: _showMidiDebug,
-              useParallelLayout: _useParallelLayout,
+              playMode: _playMode,
+              midiOutputMode: _midiOutputMode,
               hapticsEnabled: _hapticsEnabled,
               xAxisCC: _xAxisCC,
               yAxisCC: _yAxisCC,
@@ -466,11 +513,8 @@ class _PetalsHomeState extends State<PetalsHome> {
                   _showMidiDebug = value;
                 });
               },
-              onLayoutChanged: (value) {
-                setState(() {
-                  _useParallelLayout = value;
-                });
-              },
+              onPlayModeChanged: _setPlayMode,
+              onMidiOutputModeChanged: _setMidiOutputMode,
               onHapticsChanged: (value) {
                 setState(() {
                   _hapticsEnabled = value;
@@ -511,13 +555,605 @@ class _PetalsHomeState extends State<PetalsHome> {
       ),
     );
   }
+  
+  // === V1.0 EXPLORER/PARALLEL MODE ===
+  Widget _buildExplorerMode() {
+    return Row(
+      children: [
+        Expanded(
+          flex: 5,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 4, top: 4, bottom: 4),
+              child: PetalWheel(
+                selectedKey: _selectedKey,
+                isMinor: _isMinor,
+                useParallelLayout: _playMode == 'parallel',
+                hapticsEnabled: _hapticsEnabled,
+                onKeySelected: (key, minor) {
+                  setState(() {
+                    _selectedKey = key;
+                    _isMinor = minor;
+                  });
+                  _logMidi('KEY: $key${minor ? 'm' : ''}');
+                },
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 20),
+        Expanded(
+          flex: 4,
+          child: Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: ChordButtonGrid(
+              buttonColors: _buttonColors,
+              chordTypes: _chordTypes,
+              selectedKey: _selectedKey,
+              isMinor: _isMinor,
+              getChordNotes: _getChordNotes,
+              getChordName: _getChordName,
+              midiService: _midiService,
+              logMidi: _logMidi,
+              xAxisCC: _xAxisCC,
+              yAxisCC: _yAxisCC,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+  
+  // === V2.0 SONGWRITER MODE ===
+  Widget _buildSongwriterMode() {
+    return Row(
+      children: [
+        // Petal wheel for chord type selection
+        Expanded(
+          flex: 5,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 4, top: 4, bottom: 4),
+              child: SongwriterPetalWheel(
+                flowrState: _flowrState,
+                hapticsEnabled: _hapticsEnabled,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 20),
+        // Degree pads
+        Expanded(
+          flex: 4,
+          child: Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: SongwriterPadGrid(
+              flowrState: _flowrState,
+              midiService: _midiService,
+              xAxisCC: _xAxisCC,
+              yAxisCC: _yAxisCC,
+              hapticsEnabled: _hapticsEnabled,
+              logMidi: _logMidi,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ============== SONGWRITER PETAL WHEEL (v2.0) ==============
+// Uses the same beautiful SVG petals as Explorer mode, but for chord type selection
+
+class SongwriterPetalWheel extends StatefulWidget {
+  final FlowrState flowrState;
+  final bool hapticsEnabled;
+
+  const SongwriterPetalWheel({
+    super.key,
+    required this.flowrState,
+    this.hapticsEnabled = true,
+  });
+
+  // Rainbow colors matching the existing wheel
+  static const List<Color> petalColors = [
+    Color(0xFFE74C3C),   // 0: Major - Red
+    Color(0xFFE67E22),   // 1: Maj7 - Orange  
+    Color(0xFFF39C12),   // 2: Maj9 - Yellow-Orange
+    Color(0xFFF1C40F),   // 3: Add9 - Yellow
+    Color(0xFF2ECC71),   // 4: 6 - Green
+    Color(0xFF1ABC9C),   // 5: Sus2 - Teal
+    Color(0xFF3498DB),   // 6: m7 - Blue
+    Color(0xFF5DADE2),   // 7: m9 - Light Blue
+    Color(0xFF9B59B6),   // 8: Sus4 - Purple
+    Color(0xFFAF7AC5),   // 9: Dom7 (7) - Light Purple
+    Color(0xFFEC407A),   // 10: Dim - Pink
+    Color(0xFFEF5350),   // 11: Aug - Red-Pink
+  ];
+  
+  // Labels for each petal position (matching ChordRecipes.petalOrder)
+  static const List<String> petalLabels = [
+    'Maj', 'maj7', 'maj9', 'add9', '6', 'sus2',
+    'm7', 'm9', 'sus4', '7', 'dim', 'aug',
+  ];
+
+  @override
+  State<SongwriterPetalWheel> createState() => _SongwriterPetalWheelState();
+}
+
+class _SongwriterPetalWheelState extends State<SongwriterPetalWheel> {
+  int? _lastPetalIndex;
+  bool? _lastIsOuter;
+
+  void _handleTouch(Offset position, double size) {
+    final center = Offset(size / 2, size / 2);
+    final dx = position.dx - center.dx;
+    final dy = position.dy - center.dy;
+    final distance = math.sqrt(dx * dx + dy * dy);
+
+    // Ignore touches too close to center
+    if (distance < size * 0.05) return;
+
+    // Calculate angle (0 = top, clockwise)
+    var angle = math.atan2(dx, -dy) * 180 / math.pi;
+    if (angle < 0) angle += 360;
+
+    final petalIndex = ((angle + 15) / 30).floor() % 12;
+    
+    // Inner vs outer based on distance
+    final innerOuterThreshold = size * 0.28;
+    final isOuter = distance > innerOuterThreshold;
+
+    // Check if petal changed
+    if (_lastPetalIndex != petalIndex || _lastIsOuter != isOuter) {
+      _lastPetalIndex = petalIndex;
+      _lastIsOuter = isOuter;
+      
+      if (widget.hapticsEnabled) {
+        HapticFeedback.lightImpact();
+      }
+      
+      final ring = isOuter ? PetalRing.outer : PetalRing.inner;
+      final petal = PetalLayout.getPetal(ring, petalIndex);
+      
+      if (widget.flowrState.functionHeld) {
+        // Key selection mode - use chromatic order
+        final newKey = MusicalKeys.byPetalChromatic(petalIndex, inner: !isOuter);
+        widget.flowrState.setKey(newKey);
+      } else {
+        // Chord type override
+        widget.flowrState.onPetalDown(petal);
+      }
+    }
+  }
+
+  void _handleTouchEnd() {
+    _lastPetalIndex = null;
+    _lastIsOuter = null;
+    if (!widget.flowrState.functionHeld) {
+      widget.flowrState.onPetalUp();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = math.min(constraints.maxWidth, constraints.maxHeight);
+        return Center(
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: GestureDetector(
+              onPanStart: (details) => _handleTouch(details.localPosition, size),
+              onPanUpdate: (details) => _handleTouch(details.localPosition, size),
+              onPanEnd: (_) => _handleTouchEnd(),
+              onTapDown: (details) => _handleTouch(details.localPosition, size),
+              onTapUp: (_) => _handleTouchEnd(),
+              onTapCancel: _handleTouchEnd,
+              child: Stack(
+                children: [
+                  // Draw all 24 petals using SVG
+                  for (int i = 0; i < 12; i++) ...[
+                    // Outer petal
+                    _buildPetal(
+                      index: i,
+                      size: size,
+                      scale: 1.0,
+                      isOuter: true,
+                    ),
+                    // Inner petal
+                    _buildPetal(
+                      index: i,
+                      size: size,
+                      scale: 0.6,
+                      isOuter: false,
+                    ),
+                  ],
+                  // Center circle with current key
+                  Center(
+                    child: Container(
+                      width: size * 0.15,
+                      height: size * 0.15,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFF1A1A1A),
+                        border: Border.all(
+                          color: widget.flowrState.functionHeld 
+                              ? Colors.orange 
+                              : Colors.white24, 
+                          width: widget.flowrState.functionHeld ? 3 : 2,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          widget.flowrState.currentKey.name,
+                          style: TextStyle(
+                            fontSize: size * 0.04,
+                            fontWeight: FontWeight.bold,
+                            color: widget.flowrState.functionHeld 
+                                ? Colors.orange 
+                                : Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Chord type labels on outer petals
+                  for (int i = 0; i < 12; i++)
+                    _buildPetalLabel(i, size),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPetal({
+    required int index,
+    required double size,
+    required double scale,
+    required bool isOuter,
+  }) {
+    final color = SongwriterPetalWheel.petalColors[index];
+    final angle = index * 30.0;
+    
+    // Check if this petal is active
+    final activePetal = widget.flowrState.activePetal;
+    final isActive = activePetal != null &&
+        activePetal.index == index &&
+        ((isOuter && activePetal.ring == PetalRing.outer) ||
+         (!isOuter && activePetal.ring == PetalRing.inner));
+
+    final petalHeight = size * 0.42 * scale;
+    final petalWidth = size * 0.13 * scale;
+
+    final radians = angle * math.pi / 180;
+    
+    final distanceFromCenter = size * 0.08 + (petalHeight * 0.4);
+    final offsetX = size / 2 + math.sin(radians) * distanceFromCenter - petalWidth / 2;
+    final offsetY = size / 2 - math.cos(radians) * distanceFromCenter - petalHeight / 2;
+
+    return Positioned(
+      left: offsetX,
+      top: offsetY,
+      child: Transform.rotate(
+        angle: radians,
+        child: SizedBox(
+          width: petalWidth,
+          height: petalHeight,
+          child: SvgPicture.asset(
+            'assets/petal.svg',
+            colorFilter: ColorFilter.mode(
+              isActive ? Colors.white : color,
+              BlendMode.srcIn,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildPetalLabel(int index, double size) {
+    final label = SongwriterPetalWheel.petalLabels[index];
+    final angle = index * 30.0;
+    final radians = angle * math.pi / 180;
+    
+    // Position label on outer petal area
+    final labelDistance = size * 0.38;
+    final offsetX = size / 2 + math.sin(radians) * labelDistance;
+    final offsetY = size / 2 - math.cos(radians) * labelDistance;
+    
+    // Check if active
+    final activePetal = widget.flowrState.activePetal;
+    final isActive = activePetal != null && activePetal.index == index;
+
+    return Positioned(
+      left: offsetX - 20,
+      top: offsetY - 8,
+      child: SizedBox(
+        width: 40,
+        height: 16,
+        child: Center(
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+              color: isActive ? Colors.white : Colors.white70,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============== SONGWRITER PAD GRID (v2.0) ==============
+
+class SongwriterPadGrid extends StatelessWidget {
+  final FlowrState flowrState;
+  final MidiService midiService;
+  final int xAxisCC;
+  final int yAxisCC;
+  final bool hapticsEnabled;
+  final Function(String) logMidi;
+
+  const SongwriterPadGrid({
+    super.key,
+    required this.flowrState,
+    required this.midiService,
+    required this.xAxisCC,
+    required this.yAxisCC,
+    this.hapticsEnabled = true,
+    required this.logMidi,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (int row = 0; row < 3; row++)
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(
+                top: row == 0 ? 0 : 6,
+                bottom: row == 2 ? 0 : 6,
+              ),
+              child: Row(
+                children: [
+                  for (int col = 0; col < 3; col++)
+                    Expanded(
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          left: col == 0 ? 0 : 6,
+                          right: col == 2 ? 0 : 6,
+                        ),
+                        child: SongwriterPad(
+                          key: ValueKey('pad_${row * 3 + col}'),
+                          index: row * 3 + col,
+                          flowrState: flowrState,
+                          midiService: midiService,
+                          xAxisCC: xAxisCC,
+                          yAxisCC: yAxisCC,
+                          hapticsEnabled: hapticsEnabled,
+                          logMidi: logMidi,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class SongwriterPad extends StatefulWidget {
+  final int index;
+  final FlowrState flowrState;
+  final MidiService midiService;
+  final int xAxisCC;
+  final int yAxisCC;
+  final bool hapticsEnabled;
+  final Function(String) logMidi;
+
+  const SongwriterPad({
+    super.key,
+    required this.index,
+    required this.flowrState,
+    required this.midiService,
+    required this.xAxisCC,
+    required this.yAxisCC,
+    this.hapticsEnabled = true,
+    required this.logMidi,
+  });
+
+  @override
+  State<SongwriterPad> createState() => _SongwriterPadState();
+}
+
+class _SongwriterPadState extends State<SongwriterPad> {
+  bool get _isActive => widget.flowrState.activePadIndex == widget.index;
+  bool _sustainHeld = false;  // Local state for sustain pedal
+  
+  PadConfig get _padConfig => PadLayout.getPad(widget.index);
+  
+  String get _label {
+    final pad = _padConfig;
+    
+    if (pad.type == PadType.function) {
+      return widget.flowrState.functionHeld ? 'KEY' : 'FUNC';
+    } else if (pad.type == PadType.sustain) {
+      return _sustainHeld ? 'SUS ●' : 'SUS';
+    } else if (pad.degree != null) {
+      // Show chord name
+      final chord = widget.flowrState.currentChord;
+      if (_isActive && chord != null) {
+        return chord.name;
+      }
+      // Show diatonic chord name for this degree
+      final key = widget.flowrState.currentKey;
+      final degree = pad.degree!.number;
+      final root = key.degreeRoot(degree);
+      final recipe = key.diatonicRecipe(degree);
+      final rootName = _pitchClassName(root);
+      return '$rootName${recipe.symbol}';
+    }
+    return '';
+  }
+  
+  String _pitchClassName(int pitchClass) {
+    const names = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+    return names[pitchClass % 12];
+  }
+  
+  Color get _color {
+    final pad = _padConfig;
+    
+    if (pad.type == PadType.function) {
+      return _isActive ? Colors.orange : Colors.orange.shade900;
+    } else if (pad.type == PadType.sustain) {
+      return _sustainHeld 
+          ? Colors.purple 
+          : Colors.purple.shade900;
+    } else {
+      // Degree pad - use colour based on degree
+      final degreeColors = [
+        const Color(0xFF32CD32),  // I - Green (tonic)
+        const Color(0xFF4169E1),  // ii - Blue
+        const Color(0xFF9B59B6),  // iii - Purple
+        const Color(0xFFFFEB00),  // IV - Yellow
+        const Color(0xFFE74C3C),  // V - Red (dominant)
+        const Color(0xFF008B8B),  // vi - Teal
+        const Color(0xFFEC407A),  // vii° - Pink
+      ];
+      final degree = pad.degree?.number ?? 1;
+      final baseColor = degreeColors[(degree - 1) % 7];
+      return _isActive ? baseColor : baseColor.withOpacity(0.6);
+    }
+  }
+
+  void _onPanStart(DragStartDetails details) {
+    if (widget.hapticsEnabled) {
+      HapticFeedback.mediumImpact();
+    }
+    
+    final pad = _padConfig;
+    
+    // Handle sustain pad specially - send MIDI CC64
+    if (pad.type == PadType.sustain) {
+      setState(() => _sustainHeld = true);
+      widget.midiService.sendSustainOn();
+      widget.logMidi('SUSTAIN ON');
+      return;
+    }
+    
+    widget.flowrState.onPadDown(widget.index);
+    
+    final chord = widget.flowrState.currentChord;
+    if (chord != null) {
+      widget.logMidi('ON: ${chord.name}');
+    }
+    
+    _sendCC(details.localPosition);
+  }
+
+  void _onPanUpdate(DragUpdateDetails details) {
+    // Only send CC for degree pads
+    if (_padConfig.type == PadType.degree) {
+      _sendCC(details.localPosition);
+    }
+  }
+
+  void _onPanEnd(DragEndDetails details) {
+    _release();
+  }
+
+  void _onPanCancel() {
+    _release();
+  }
+
+  void _sendCC(Offset localPosition) {
+    if (_padConfig.type != PadType.degree) return;
+    
+    final RenderBox? box = context.findRenderObject() as RenderBox?;
+    if (box == null) return;
+
+    final size = box.size;
+
+    final ccX = (localPosition.dx / size.width * 127).clamp(0, 127).toInt();
+    final ccY = (127 - (localPosition.dy / size.height * 127)).clamp(0, 127).toInt();
+
+    widget.midiService.sendCC(widget.xAxisCC, ccX);
+    widget.midiService.sendCC(widget.yAxisCC, ccY);
+  }
+
+  void _release() {
+    final pad = _padConfig;
+    
+    // Handle sustain pad specially
+    if (pad.type == PadType.sustain) {
+      setState(() => _sustainHeld = false);
+      widget.midiService.sendSustainOff();
+      widget.logMidi('SUSTAIN OFF');
+      return;
+    }
+    
+    final chord = widget.flowrState.currentChord;
+    widget.flowrState.onPadUp(widget.index);
+    
+    if (chord != null && pad.type == PadType.degree) {
+      widget.logMidi('OFF: ${chord.name}');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // For sustain pad, use local _sustainHeld state for visual
+    final isVisuallyActive = _padConfig.type == PadType.sustain 
+        ? _sustainHeld 
+        : _isActive;
+        
+    return GestureDetector(
+      onPanStart: _onPanStart,
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: _onPanEnd,
+      onPanCancel: _onPanCancel,
+      child: CustomPaint(
+        painter: ButtonPainter(
+          index: widget.index,
+          color: _color,
+          isFilled: isVisuallyActive,
+        ),
+        child: Center(
+          child: Text(
+            _label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: _isActive ? Colors.white : _color,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ============== SETTINGS OVERLAY ==============
 
 class SettingsOverlay extends StatefulWidget {
   final bool showMidiDebug;
-  final bool useParallelLayout;
+  final String playMode;
+  final MidiOutputMode midiOutputMode;
   final bool hapticsEnabled;
   final int xAxisCC;
   final int yAxisCC;
@@ -527,7 +1163,8 @@ class SettingsOverlay extends StatefulWidget {
   final int gyroZCC;
   final List<Map<String, dynamic>> ccOptions;
   final Function(bool) onMidiDebugChanged;
-  final Function(bool) onLayoutChanged;
+  final Function(String) onPlayModeChanged;
+  final Function(MidiOutputMode) onMidiOutputModeChanged;
   final Function(bool) onHapticsChanged;
   final Function(int) onXAxisCCChanged;
   final Function(int) onYAxisCCChanged;
@@ -540,7 +1177,8 @@ class SettingsOverlay extends StatefulWidget {
   const SettingsOverlay({
     super.key,
     required this.showMidiDebug,
-    required this.useParallelLayout,
+    required this.playMode,
+    required this.midiOutputMode,
     required this.hapticsEnabled,
     required this.xAxisCC,
     required this.yAxisCC,
@@ -550,7 +1188,8 @@ class SettingsOverlay extends StatefulWidget {
     required this.gyroZCC,
     required this.ccOptions,
     required this.onMidiDebugChanged,
-    required this.onLayoutChanged,
+    required this.onPlayModeChanged,
+    required this.onMidiOutputModeChanged,
     required this.onHapticsChanged,
     required this.onXAxisCCChanged,
     required this.onYAxisCCChanged,
@@ -588,7 +1227,7 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
       onTap: () {}, // Prevent tap-through
       child: Container(
         width: 380,
-        constraints: const BoxConstraints(maxHeight: 520),
+        constraints: const BoxConstraints(maxHeight: 560),
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
           color: const Color(0xFF2A2A2A),
@@ -600,7 +1239,7 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // FLOWR logo at top - rainbow colors
+              // FLOWR logo at top
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -632,6 +1271,40 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
                 ],
               ),
               const SizedBox(height: 20),
+              
+              // === PLAY MODE SECTION ===
+              const Text(
+                'Play Mode',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              _buildPlayModeSelector(),
+              
+              const SizedBox(height: 20),
+              const Divider(color: Colors.white24),
+              const SizedBox(height: 16),
+              
+              // === MIDI OUTPUT SECTION ===
+              const Text(
+                'MIDI Output',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              _buildMidiOutputSelector(),
+              
+              const SizedBox(height: 20),
+              const Divider(color: Colors.white24),
+              const SizedBox(height: 16),
               
               // === XY PAD SECTION ===
               const Text(
@@ -725,16 +1398,6 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
               const SizedBox(height: 8),
               
               _buildToggleRow(
-                label: 'Parallel Layout',
-                subtitle: widget.useParallelLayout 
-                    ? 'Cm inside C' 
-                    : 'Am inside C (Circle of 5ths)',
-                value: widget.useParallelLayout,
-                onChanged: widget.onLayoutChanged,
-              ),
-              const SizedBox(height: 8),
-              
-              _buildToggleRow(
                 label: 'MIDI Debug Panel',
                 value: widget.showMidiDebug,
                 onChanged: widget.onMidiDebugChanged,
@@ -744,10 +1407,10 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
               // About link
               GestureDetector(
                 onTap: () => setState(() => _showAbout = true),
-                child: Row(
+                child: const Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text(
+                    Text(
                       'About',
                       style: TextStyle(color: Colors.white, fontSize: 14),
                     ),
@@ -757,6 +1420,115 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
                       size: 24,
                     ),
                   ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildPlayModeSelector() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF3A3A3A),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          _buildModeButton('songwriter', 'Songwriter', 'Pads = degrees'),
+          _buildModeButton('explorer', 'Explorer', 'Circle of 5ths'),
+          _buildModeButton('parallel', 'Parallel', 'Major/minor'),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildModeButton(String mode, String label, String subtitle) {
+    final isSelected = widget.playMode == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => widget.onPlayModeChanged(mode),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.purple.withOpacity(0.3) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            border: isSelected 
+                ? Border.all(color: Colors.purple, width: 1)
+                : null,
+          ),
+          child: Column(
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : Colors.white70,
+                  fontSize: 12,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: isSelected ? Colors.white54 : Colors.white38,
+                  fontSize: 9,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  
+  Widget _buildMidiOutputSelector() {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF3A3A3A),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          _buildMidiOutputButton(MidiOutputMode.apps, 'Apps / PC', 'Default mode'),
+          _buildMidiOutputButton(MidiOutputMode.external, 'Hardware', 'OTG to synth'),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildMidiOutputButton(MidiOutputMode mode, String label, String subtitle) {
+    final isSelected = widget.midiOutputMode == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => widget.onMidiOutputModeChanged(mode),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.green.withOpacity(0.3) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+            border: isSelected 
+                ? Border.all(color: Colors.green, width: 1)
+                : null,
+          ),
+          child: Column(
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : Colors.white70,
+                  fontSize: 12,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: isSelected ? Colors.white54 : Colors.white38,
+                  fontSize: 9,
                 ),
               ),
             ],
@@ -890,7 +1662,7 @@ class AboutModal extends StatelessWidget {
                 ),
               ),
 
-              // Logo text with Syncopate font - rainbow colors
+              // Logo text
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -905,43 +1677,43 @@ class AboutModal extends StatelessWidget {
                   Text('R', style: GoogleFonts.syncopate(color: const Color(0xFFD57CFF), fontSize: 32, fontWeight: FontWeight.w400)),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
 
               // Tagline
               const Text(
                 'A modern composition tool',
                 style: TextStyle(
+                  color: Colors.white54,
+                  fontSize: 14,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // Version
+              const Text(
+                'Version 2.0.0 (1)',
+                style: TextStyle(
                   color: Colors.white70,
                   fontSize: 14,
                 ),
               ),
-              const SizedBox(height: 16),
-
-              // Version
-              const Text(
-                'Version 1.0.0 (12)',
-                style: TextStyle(
-                  color: Colors.white54,
-                  fontSize: 12,
-                ),
-              ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
 
               // Credits
               const Text(
                 'Created by',
                 style: TextStyle(
-                  color: Colors.white54,
+                  color: Colors.white38,
                   fontSize: 12,
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 4),
               const Text(
                 'Daniel Cotugno-Cregin',
                 style: TextStyle(
-                  color: Colors.white,
+                  color: Colors.white70,
                   fontSize: 14,
-                  fontWeight: FontWeight.w500,
                 ),
               ),
               const Text(
@@ -962,52 +1734,52 @@ class AboutModal extends StatelessWidget {
                 ),
               ),
 
-            const SizedBox(height: 20),
-            const Divider(color: Colors.white24, height: 1),
-            const SizedBox(height: 20),
+              const SizedBox(height: 20),
+              const Divider(color: Colors.white24, height: 1),
+              const SizedBox(height: 20),
 
-            // Links
-            GestureDetector(
-              onTap: () => _launchUrl('https://getflowr.io'),
-              child: const Text(
-                'getflowr.io',
-                style: TextStyle(
-                  color: Colors.blueAccent,
-                  fontSize: 14,
+              // Links
+              GestureDetector(
+                onTap: () => _launchUrl('https://getflowr.io'),
+                child: const Text(
+                  'getflowr.io',
+                  style: TextStyle(
+                    color: Colors.blueAccent,
+                    fontSize: 14,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 14),
-            GestureDetector(
-              onTap: () => _launchUrl('https://getflowr.io/privacy-policy'),
-              child: const Text(
-                'Privacy Policy',
-                style: TextStyle(
-                  color: Colors.blueAccent,
-                  fontSize: 14,
+              const SizedBox(height: 14),
+              GestureDetector(
+                onTap: () => _launchUrl('https://getflowr.io/privacy-policy'),
+                child: const Text(
+                  'Privacy Policy',
+                  style: TextStyle(
+                    color: Colors.blueAccent,
+                    fontSize: 14,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 14),
-            GestureDetector(
-              onTap: () => _launchUrl('https://getflowr.io/support'),
-              child: const Text(
-                'Support',
-                style: TextStyle(
-                  color: Colors.blueAccent,
-                  fontSize: 14,
+              const SizedBox(height: 14),
+              GestureDetector(
+                onTap: () => _launchUrl('https://getflowr.io/support'),
+                child: const Text(
+                  'Support',
+                  style: TextStyle(
+                    color: Colors.blueAccent,
+                    fontSize: 14,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-// ============== CHORD BUTTON GRID ==============
+// ============== V1.0 CHORD BUTTON GRID ==============
 
 class ChordButtonGrid extends StatelessWidget {
   final List<Color> buttonColors;
@@ -1080,7 +1852,7 @@ class ChordButtonGrid extends StatelessWidget {
   }
 }
 
-// ============== CHORD BUTTON ==============
+// ============== V1.0 CHORD BUTTON ==============
 
 class ChordButton extends StatefulWidget {
   final int index;
@@ -1128,11 +1900,9 @@ class _ChordButtonState extends State<ChordButton> {
   void didUpdateWidget(ChordButton oldWidget) {
     super.didUpdateWidget(oldWidget);
     
-    // If key or minor changed while button is pressed, retrigger the chord
     if (_isPressed && 
         (oldWidget.selectedKey != widget.selectedKey || 
          oldWidget.isMinor != widget.isMinor)) {
-      // Use post-frame callback to avoid setState during build
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _isPressed) {
           _retriggerChord();
@@ -1142,12 +1912,10 @@ class _ChordButtonState extends State<ChordButton> {
   }
 
   void _retriggerChord() {
-    // Send note-off for old chord
     if (_currentNotes.isNotEmpty) {
       widget.midiService.sendChordOff(_currentNotes);
     }
     
-    // Calculate and play new chord
     final intervals = List<int>.from(widget.chordType['intervals']);
     _currentNotes = widget.getChordNotes(intervals);
     

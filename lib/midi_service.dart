@@ -1,18 +1,39 @@
 import 'package:flutter/services.dart';
 import 'dart:typed_data';
 
+enum MidiOutputMode {
+  apps,      // Virtual MIDI to other apps on same device (AND to PC via USB!)
+  external,  // Direct USB host mode (for hardware synths via OTG)
+}
+
 class MidiService {
-  // USB MIDI channel
+  // USB MIDI channel (for USB HOST mode - phone connecting TO hardware synth)
   static const _usbChannel = MethodChannel('com.petals/midi');
-  // Virtual MIDI channel
+  // Virtual MIDI channel (FlowrMidiDeviceService - works for apps AND PC via USB gadget)
   static const _virtualChannel = MethodChannel('flowr/midi_virtual');
   
   bool _usbConnected = false;
-  bool _virtualEnabled = true; // Always enabled once service starts
+  
+  // Output mode - defaults to apps
+  MidiOutputMode _outputMode = MidiOutputMode.apps;
   
   bool get isUsbConnected => _usbConnected;
-  bool get isVirtualEnabled => _virtualEnabled;
-  bool get isConnected => _usbConnected || _virtualEnabled;
+  MidiOutputMode get outputMode => _outputMode;
+  
+  bool get isConnected => true;
+  
+  String get connectionStatusText {
+    switch (_outputMode) {
+      case MidiOutputMode.apps:
+        return 'MIDI Active (Apps/PC)';
+      case MidiOutputMode.external:
+        return _usbConnected ? 'Hardware Connected' : 'No Hardware Found';
+    }
+  }
+
+  void setOutputMode(MidiOutputMode mode) {
+    _outputMode = mode;
+  }
 
   Future<void> checkConnection() async {
     try {
@@ -22,19 +43,34 @@ class MidiService {
       _usbConnected = false;
     }
   }
+  
+  Future<void> reconnectUsb() async {
+    try {
+      await _usbChannel.invokeMethod('reconnect');
+      await checkConnection();
+    } catch (e) {
+      // Ignore errors
+    }
+  }
 
-  /// Send MIDI to both USB and Virtual outputs
+  /// Send MIDI based on current output mode
   void _sendMidiData(List<int> data) {
     final bytes = Uint8List.fromList(data);
     
-    // Send via USB
-    if (_usbConnected) {
-      _usbChannel.invokeMethod('sendMidi', {'data': bytes});
-    }
-    
-    // Send via Virtual MIDI (to other apps on same device)
-    if (_virtualEnabled) {
-      _virtualChannel.invokeMethod('sendMidi', bytes);
+    switch (_outputMode) {
+      case MidiOutputMode.apps:
+        // Virtual channel handles BOTH on-device apps AND USB to PC!
+        // This is what your original did and it worked
+        _virtualChannel.invokeMethod('sendMidi', bytes);
+        break;
+        
+      case MidiOutputMode.external:
+        // USB host mode - for connecting hardware synth TO phone via OTG
+        // Only use this when you have a synth plugged into the phone
+        if (_usbConnected) {
+          _usbChannel.invokeMethod('sendMidi', {'data': bytes});
+        }
+        break;
     }
   }
 
@@ -63,6 +99,14 @@ class MidiService {
     for (final note in notes) {
       sendNoteOff(note, channel: channel);
     }
+  }
+  
+  void sendSustainOn({int channel = 0}) {
+    sendCC(64, 127, channel: channel);
+  }
+  
+  void sendSustainOff({int channel = 0}) {
+    sendCC(64, 0, channel: channel);
   }
 
   void dispose() {}
