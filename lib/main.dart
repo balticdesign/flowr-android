@@ -64,7 +64,7 @@ class _PetalsHomeState extends State<PetalsHome> {
   bool _hapticsEnabled = true;
   
   // Play mode: 'songwriter' (v2.0), 'explorer' (v1.0 circle of 5ths), 'parallel' (v1.0 parallel)
-  String _playMode = 'explorer';  // Default to v1.0 for backwards compatibility
+  String _playMode = 'songwriter';  // Default to v2.0 Songwriter mode
   
   // XY Pad CC assignments
   int _xAxisCC = 1;
@@ -310,46 +310,121 @@ class _PetalsHomeState extends State<PetalsHome> {
               ? _buildSongwriterMode()
               : _buildExplorerMode(),
           
-          // Settings icon
+          // FLOWR logo (top-left) with settings icon below
           Positioned(
-            top: 12,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: GestureDetector(
-                onTap: _openSettings,
-                child: SvgPicture.asset(
-                  'assets/settings.svg',
-                  width: 28,
-                  height: 28,
-                  colorFilter: const ColorFilter.mode(
-                    Colors.grey,
-                    BlendMode.srcIn,
+            top: 10,
+            left: 12,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Logo
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('F', style: GoogleFonts.syncopate(color: const Color(0xFFBF0000), fontSize: 14, fontWeight: FontWeight.w400)),
+                    const SizedBox(width: 6),
+                    Text('L', style: GoogleFonts.syncopate(color: const Color(0xFFFF7C00), fontSize: 14, fontWeight: FontWeight.w400)),
+                    const SizedBox(width: 6),
+                    Text('O', style: GoogleFonts.syncopate(color: const Color(0xFFD9FF00), fontSize: 14, fontWeight: FontWeight.w400)),
+                    const SizedBox(width: 6),
+                    Text('W', style: GoogleFonts.syncopate(color: const Color(0xFF008A6D), fontSize: 14, fontWeight: FontWeight.w400)),
+                    const SizedBox(width: 6),
+                    Text('R', style: GoogleFonts.syncopate(color: const Color(0xFFD57CFF), fontSize: 14, fontWeight: FontWeight.w400)),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                // Settings icon below logo
+                GestureDetector(
+                  onTap: _openSettings,
+                  child: SvgPicture.asset(
+                    'assets/settings.svg',
+                    width: 18,
+                    height: 18,
+                    colorFilter: const ColorFilter.mode(
+                      Colors.grey,
+                      BlendMode.srcIn,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
+          // Octave control (vertical, between wheel and pads) - Songwriter mode only
+          if (_playMode == 'songwriter')
+            Positioned(
+              top: 0,
+              bottom: 0,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Transform.translate(
+                  offset: const Offset(40, 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Up chevron
+                      GestureDetector(
+                        onTap: () {
+                          _flowrState.octaveUp();
+                          if (_hapticsEnabled) HapticFeedback.lightImpact();
+                        },
+                        child: const Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text(
+                            '∧',
+                            style: TextStyle(
+                              color: Color(0xFFE74C3C), // Red
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              height: 1,
+                            ),
+                          ),
+                        ),
+                      ),
+                      // Octave number in Syncopate font
+                      Text(
+                        '${_flowrState.baseOctave}',
+                        style: GoogleFonts.syncopate(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      // Down chevron
+                      GestureDetector(
+                        onTap: () {
+                          _flowrState.octaveDown();
+                          if (_hapticsEnabled) HapticFeedback.lightImpact();
+                        },
+                        child: const Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text(
+                            '∨',
+                            style: TextStyle(
+                              color: Color(0xFF3498DB), // Blue
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              height: 1,
+                            ),
+                          ),
+                        ),
+                      ),
+                      // OCT label in Syncopate font
+                      Text(
+                        'OCT',
+                        style: GoogleFonts.syncopate(
+                          color: Colors.white54,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ),
-          ),
-
-          // FLOWR logo (top-left)
-          Positioned(
-            top: 10,
-            left: 12,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('F', style: GoogleFonts.syncopate(color: const Color(0xFFBF0000), fontSize: 14, fontWeight: FontWeight.w400)),
-                const SizedBox(width: 6),
-                Text('L', style: GoogleFonts.syncopate(color: const Color(0xFFFF7C00), fontSize: 14, fontWeight: FontWeight.w400)),
-                const SizedBox(width: 6),
-                Text('O', style: GoogleFonts.syncopate(color: const Color(0xFFD9FF00), fontSize: 14, fontWeight: FontWeight.w400)),
-                const SizedBox(width: 6),
-                Text('W', style: GoogleFonts.syncopate(color: const Color(0xFF008A6D), fontSize: 14, fontWeight: FontWeight.w400)),
-                const SizedBox(width: 6),
-                Text('R', style: GoogleFonts.syncopate(color: const Color(0xFFD57CFF), fontSize: 14, fontWeight: FontWeight.w400)),
-              ],
-            ),
-          ),
           
           // Mode indicator (bottom-left, above GYRO if present)
           Positioned(
@@ -675,7 +750,7 @@ class SongwriterPetalWheel extends StatefulWidget {
   
   // Labels for each petal position (matching ChordRecipes.petalOrder)
   static const List<String> petalLabels = [
-    'Maj', 'maj7', 'maj9', 'add9', '6', 'sus2',
+    '⇄', 'maj7', 'maj9', 'add9', '6', 'sus2',
     'm7', 'm9', 'sus4', '7', 'dim', 'aug',
   ];
 
@@ -997,12 +1072,29 @@ class _SongwriterPadState extends State<SongwriterPad> {
       if (_isActive && chord != null) {
         return chord.name;
       }
-      // Show diatonic chord name for this degree
+      
+      // Get key and degree info
       final key = widget.flowrState.currentKey;
       final degree = pad.degree!.number;
       final root = key.degreeRoot(degree);
-      final recipe = key.diatonicRecipe(degree);
       final rootName = _pitchClassName(root);
+      
+      // Check if a petal is touched - show what chord WOULD play
+      final activePetal = widget.flowrState.activePetal;
+      if (activePetal != null) {
+        final recipe = activePetal.recipe;
+        // Handle quality toggle
+        if (recipe.isQualityToggle) {
+          final diatonic = key.diatonicRecipe(degree);
+          // Show toggled quality
+          final hasMinor3rd = diatonic.intervals.contains(3);
+          return hasMinor3rd ? rootName : '${rootName}m';
+        }
+        return '$rootName${recipe.symbol}';
+      }
+      
+      // Show diatonic chord name for this degree
+      final recipe = key.diatonicRecipe(degree);
       return '$rootName${recipe.symbol}';
     }
     return '';
@@ -1492,8 +1584,8 @@ class _SettingsOverlayState extends State<SettingsOverlay> {
       ),
       child: Row(
         children: [
-          _buildMidiOutputButton(MidiOutputMode.apps, 'Apps / PC', 'Default mode'),
-          _buildMidiOutputButton(MidiOutputMode.external, 'Hardware', 'OTG to synth'),
+          _buildMidiOutputButton(MidiOutputMode.apps, 'Apps', 'Inter-app MIDI'),
+          _buildMidiOutputButton(MidiOutputMode.external, 'USB', 'PC / Hardware'),
         ],
       ),
     );

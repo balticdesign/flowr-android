@@ -6,11 +6,15 @@ class ChordRecipe {
   final String name;
   final String symbol;
   final List<int> intervals;
+  
+  /// If true, this recipe toggles major/minor quality instead of replacing
+  final bool isQualityToggle;
 
   const ChordRecipe({
     required this.name,
     required this.symbol,
     required this.intervals,
+    this.isQualityToggle = false,
   });
 
   /// Convert intervals to pitch classes given a root pitch class (0-11)
@@ -42,6 +46,16 @@ class ChordRecipe {
 class ChordRecipes {
   // Prevent instantiation
   ChordRecipes._();
+
+  // === SPECIAL ===
+  
+  /// Quality toggle - flips major ↔ minor
+  static const qualityToggle = ChordRecipe(
+    name: 'Maj/Min',
+    symbol: '⇄',
+    intervals: [0, 4, 7], // Placeholder - actual intervals computed at runtime
+    isQualityToggle: true,
+  );
 
   // === TRIADS ===
 
@@ -133,10 +147,11 @@ class ChordRecipes {
 
   // === PETAL WHEEL ORDER ===
   // Clockwise from 12 o'clock
-  // Bright hemisphere (12-5), Dark hemisphere (6-11)
+  // Position 0 is quality toggle (Maj/Min)
+  // Bright hemisphere (1-5), Dark hemisphere (6-11)
 
   static const petalOrder = <ChordRecipe>[
-    major, // 12:00 - bright
+    qualityToggle, // 12:00 - Maj/Min toggle
     maj7, //  1:00
     maj9, //  2:00
     add9, //  3:00

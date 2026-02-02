@@ -122,6 +122,16 @@ class FlowrState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Increase base octave by 1
+  void octaveUp() {
+    setBaseOctave(_baseOctave + 1);
+  }
+
+  /// Decrease base octave by 1
+  void octaveDown() {
+    setBaseOctave(_baseOctave - 1);
+  }
+
   // === PAD INPUT ===
 
   /// Handle pad press
@@ -238,6 +248,9 @@ class FlowrState extends ChangeNotifier {
   // === PETAL INPUT ===
 
   /// Handle petal touch
+  /// 
+  /// In Songwriter mode, petal changes do NOT retrigger chords - they only
+  /// set the chord type for the NEXT pad press. This is more musical.
   void onPetalDown(PetalConfig petal) {
     // If function held, this is key selection
     if (_functionHeld) {
@@ -246,32 +259,24 @@ class FlowrState extends ChangeNotifier {
     }
 
     _activePetal = petal;
-
-    // If a pad is already pressed, update the chord
-    if (_activePadIndex != null) {
-      final pad = PadLayout.getPad(_activePadIndex!);
-      if (pad.degree != null) {
-        _playChordForDegree(pad.degree!.number);
-      }
-    }
-
+    
+    // In Songwriter mode, petal changes do NOT retrigger - just update state
+    // The new chord type will apply on the next pad press
+    
     notifyListeners();
   }
 
   /// Handle petal release
+  /// 
+  /// In Songwriter mode, releasing a petal does NOT revert the playing chord.
+  /// The chord keeps playing with its current type.
   void onPetalUp() {
     if (_activePetal == null) return;
 
     _activePetal = null;
-
-    // If a pad is still pressed, revert to diatonic chord
-    if (_activePadIndex != null) {
-      final pad = PadLayout.getPad(_activePadIndex!);
-      if (pad.degree != null) {
-        _playChordForDegree(pad.degree!.number);
-      }
-    }
-
+    
+    // In Songwriter mode, don't retrigger - chord keeps playing as-is
+    
     notifyListeners();
   }
 

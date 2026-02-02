@@ -1,17 +1,17 @@
 /// Voice leader handles automatic chord voicing for smooth progressions.
 /// 
-/// When enabled, it selects the inversion of each chord that minimises
-/// the total semitone movement from the previous chord. This creates
-/// professional-sounding progressions with smooth voice leading.
+/// Uses OPEN voicings (like outer petals) but selects inversions that
+/// minimize movement in the voice-leading zone (middle voices).
+/// 
+/// Mental model:
+/// ```
+/// [ Bass anchor ]         ← root moves by chord root
+/// [ Voice-leading zone ]  ← auto-voicing minimizes movement here
+/// [ Top anchor ]          ← may shift octave to reduce total movement
+/// ```
 class VoiceLeader {
   /// Previous chord notes for comparison
   List<int>? _previousChord;
-
-  /// Minimum MIDI note (default C3 = 48)
-  final int minPitch;
-
-  /// Maximum MIDI note (default C6 = 84)
-  final int maxPitch;
 
   /// Time of last chord for reset detection
   DateTime? _lastChordTime;
@@ -20,8 +20,6 @@ class VoiceLeader {
   final Duration resetTimeout;
 
   VoiceLeader({
-    this.minPitch = 48,
-    this.maxPitch = 84,
     this.resetTimeout = const Duration(seconds: 2),
   });
 
@@ -29,36 +27,38 @@ class VoiceLeader {
   /// 
   /// [pitchClasses] - List of pitch classes (0-11) in the chord
   /// [rootPitchClass] - The root note pitch class (for reference)
+  /// [baseOctave] - The user's selected base octave (2-6)
   /// 
   /// Returns MIDI note numbers for the voiced chord.
-  List<int> voice(List<int> pitchClasses, int rootPitchClass) {
+  List<int> voice(List<int> pitchClasses, int rootPitchClass, {int baseOctave = 4}) {
     // Check for timeout reset
     if (_shouldReset()) {
       reset();
     }
 
-    final candidates = _generateInversions(pitchClasses);
+    // Generate open voicing candidates
+    final candidates = _generateOpenVoicings(pitchClasses, rootPitchClass, baseOctave);
 
     if (candidates.isEmpty) {
-      // Fallback: generate a simple voicing
-      return _buildSimpleVoicing(pitchClasses, 4);
+      // Fallback: generate a basic open voicing
+      return _buildOpenVoicing(pitchClasses, rootPitchClass, baseOctave);
     }
 
     // Update timestamp
     _lastChordTime = DateTime.now();
 
-    // If no previous chord, return first candidate (root position)
+    // If no previous chord, return first candidate
     if (_previousChord == null) {
       _previousChord = candidates.first;
       return _previousChord!;
     }
 
-    // Find the candidate with minimum movement
+    // Find the candidate with minimum movement in voice-leading zone
     var best = candidates.first;
-    var bestScore = _movementScore(candidates.first, _previousChord!);
+    var bestScore = _voiceLeadingScore(candidates.first, _previousChord!);
 
     for (final candidate in candidates.skip(1)) {
-      final score = _movementScore(candidate, _previousChord!);
+      final score = _voiceLeadingScore(candidate, _previousChord!);
       if (score < bestScore) {
         bestScore = score;
         best = candidate;
@@ -69,104 +69,173 @@ class VoiceLeader {
     return best;
   }
 
-  /// Generate a root position voicing (no voice leading)
-  List<int> voiceRootPosition(List<int> pitchClasses, {int octave = 4}) {
-    // Update timestamp but don't affect voice leading context
-    _lastChordTime = DateTime.now();
-    return _buildSimpleVoicing(pitchClasses, octave);
-  }
-
   /// Check if we should reset due to timeout
   bool _shouldReset() {
     if (_lastChordTime == null) return false;
     return DateTime.now().difference(_lastChordTime!) > resetTimeout;
   }
 
-  /// Generate all valid inversions of a chord within the pitch range
-  List<List<int>> _generateInversions(List<int> pitchClasses) {
+  /// Generate open voicing candidates with different inversions
+  /// 
+  /// Structure: Bass (root) - Middle voices (spread) - Top (root octave up)
+  List<List<int>> _generateOpenVoicings(List<int> pitchClasses, int rootPitchClass, int baseOctave) {
     final results = <List<int>>[];
-
-    if (pitchClasses.isEmpty) return results;
-
-    // Try different bass octaves
-    for (int bassOctave = 3; bassOctave <= 5; bassOctave++) {
-      // Try each inversion (rotate which pitch class is in bass)
-      for (int inv = 0; inv < pitchClasses.length; inv++) {
-        final rotated = _rotate(pitchClasses, inv);
-        final voiced = _stackFromBass(rotated, bassOctave);
-
-        // Check all notes are within range
-        if (voiced.every((n) => n >= minPitch && n <= maxPitch)) {
-          results.add(voiced);
+    
+    if (pitchClasses.length < 3) return results;
+    
+    final isLowOctave = baseOctave <= 3;
+    
+    // Get intervals relative to root
+    final root = pitchClasses[0];
+    final third = pitchClasses.length > 1 ? pitchClasses[1] : null;
+    final fifth = pitchClasses.length > 2 ? pitchClasses[2] : null;
+    final extensions = pitchClasses.length > 3 ? pitchClasses.sublist(3) : <int>[];
+    
+    // Try different voicing arrangements
+    for (int bassOctaveOffset = -1; bassOctaveOffset <= 1; bassOctaveOffset++) {
+      final bassOctave = baseOctave + bassOctaveOffset;
+      if (bassOctave < 2 || bassOctave > 5) continue;
+      
+      final bassMidi = (bassOctave * 12) + root;
+      
+      // Skip if bass too low or high
+      if (bassMidi < 36 || bassMidi > 72) continue; // C2 to C5
+      
+      // Generate variations of middle voice placement
+      for (int middleOctaveOffset = 0; middleOctaveOffset <= 1; middleOctaveOffset++) {
+        final notes = <int>[];
+        
+        // 1. Bass anchor (root)
+        notes.add(bassMidi);
+        
+        // 2. Middle voices (3rd and 5th) - the voice-leading zone
+        final middleOctave = isLowOctave ? bassOctave + 1 + middleOctaveOffset : bassOctave + middleOctaveOffset;
+        
+        if (fifth != null) {
+          notes.add((middleOctave * 12) + fifth);
+        }
+        if (third != null) {
+          var thirdMidi = (middleOctave * 12) + third;
+          // Ensure 3rd is above 5th for some voicings, or below for others
+          if (thirdMidi <= notes.last) {
+            thirdMidi += 12;
+          }
+          notes.add(thirdMidi);
+        }
+        
+        // 3. Extensions (7th, 9th) go higher
+        for (final ext in extensions) {
+          var extMidi = ((middleOctave + 1) * 12) + ext;
+          while (extMidi <= notes.last) {
+            extMidi += 12;
+          }
+          if (extMidi <= 96) { // Don't exceed C7
+            notes.add(extMidi);
+          }
+        }
+        
+        // 4. Top anchor (root up 1-2 octaves)
+        final topRoot = bassMidi + (isLowOctave ? 24 : 12);
+        if (topRoot <= 96 && topRoot > notes.last) {
+          notes.add(topRoot);
+        }
+        
+        // Sort and validate
+        notes.sort();
+        if (notes.length >= 3 && notes.every((n) => n >= 36 && n <= 96)) {
+          results.add(notes);
+        }
+      }
+      
+      // Also try inverted voicings (5th in bass, 3rd in bass)
+      if (fifth != null) {
+        final invBass = (bassOctave * 12) + fifth;
+        if (invBass >= 36 && invBass <= 72) {
+          final notes = <int>[invBass];
+          final middleOctave = isLowOctave ? bassOctave + 1 : bassOctave;
+          
+          // Root above bass
+          notes.add((middleOctave * 12) + root);
+          
+          // 3rd
+          if (third != null) {
+            var thirdMidi = (middleOctave * 12) + third;
+            while (thirdMidi <= notes.last) thirdMidi += 12;
+            notes.add(thirdMidi);
+          }
+          
+          // Extensions
+          for (final ext in extensions) {
+            var extMidi = ((middleOctave + 1) * 12) + ext;
+            while (extMidi <= notes.last) extMidi += 12;
+            if (extMidi <= 96) notes.add(extMidi);
+          }
+          
+          notes.sort();
+          if (notes.length >= 3 && notes.every((n) => n >= 36 && n <= 96)) {
+            results.add(notes);
+          }
         }
       }
     }
-
+    
     return results;
   }
 
-  /// Rotate a list so the element at [positions] becomes first
-  List<int> _rotate(List<int> list, int positions) {
-    if (list.isEmpty || positions == 0) return List.from(list);
-    final n = positions % list.length;
-    return [...list.sublist(n), ...list.sublist(0, n)];
-  }
-
-  /// Stack pitch classes upward from a bass octave
-  List<int> _stackFromBass(List<int> pitchClasses, int bassOctave) {
+  /// Build a basic open voicing (fallback)
+  List<int> _buildOpenVoicing(List<int> pitchClasses, int rootPitchClass, int baseOctave) {
     final notes = <int>[];
-    int lastPitch = -1;
-
-    for (final pc in pitchClasses) {
-      int pitch = (bassOctave * 12) + pc;
-
-      // Ensure each note is higher than the last
-      while (pitch <= lastPitch) {
-        pitch += 12;
-      }
-
-      notes.add(pitch);
-      lastPitch = pitch;
+    final bassMidi = (baseOctave * 12) + pitchClasses[0];
+    final isLowOctave = baseOctave <= 3;
+    
+    notes.add(bassMidi);
+    
+    for (int i = 1; i < pitchClasses.length; i++) {
+      final octaveOffset = isLowOctave ? (i <= 2 ? 1 : 2) : (i <= 2 ? 0 : 1);
+      var midi = ((baseOctave + octaveOffset) * 12) + pitchClasses[i];
+      while (midi <= notes.last) midi += 12;
+      if (midi <= 96) notes.add(midi);
     }
-
+    
+    // Add top root
+    final topRoot = bassMidi + (isLowOctave ? 24 : 12);
+    if (topRoot <= 96 && topRoot > notes.last) {
+      notes.add(topRoot);
+    }
+    
+    notes.sort();
     return notes;
   }
 
-  /// Build a simple root position voicing
-  List<int> _buildSimpleVoicing(List<int> pitchClasses, int octave) {
-    return _stackFromBass(pitchClasses, octave);
-  }
-
-  /// Calculate total semitone movement between two chords
+  /// Calculate voice-leading score
   /// 
-  /// For each note in the new chord, find the closest note in the old chord
-  /// and sum up all the distances.
-  int _movementScore(List<int> newChord, List<int> oldChord) {
+  /// Prioritizes minimal movement in middle voices (voice-leading zone)
+  /// while allowing bass and top to move more freely.
+  int _voiceLeadingScore(List<int> newChord, List<int> oldChord) {
+    if (newChord.isEmpty || oldChord.isEmpty) return 1000;
+    
     int total = 0;
-
-    for (final newNote in newChord) {
+    
+    // Score each voice by closest match in old chord
+    for (int i = 0; i < newChord.length; i++) {
       int minDistance = 127;
-
+      
       for (final oldNote in oldChord) {
-        final distance = (newNote - oldNote).abs();
+        final distance = (newChord[i] - oldNote).abs();
         if (distance < minDistance) {
           minDistance = distance;
         }
       }
-
-      total += minDistance;
+      
+      // Weight middle voices more heavily (they should move least)
+      final isMiddleVoice = i > 0 && i < newChord.length - 1;
+      total += isMiddleVoice ? minDistance * 2 : minDistance;
     }
-
+    
     return total;
   }
 
   /// Reset the voice leading context
-  /// 
-  /// Call this when:
-  /// - Key changes
-  /// - User manually requests reset
-  /// - Long pause between chords
-  /// - Mode changes
   void reset() {
     _previousChord = null;
     _lastChordTime = null;
